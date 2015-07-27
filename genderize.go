@@ -1,3 +1,4 @@
+// Package genderize provides a client for the Genderize.io web service.
 package genderize
 
 import (
@@ -14,12 +15,10 @@ const (
 	Unknown = ""
 )
 
-const (
-	// Version of this library. Used to form the default user agent string.
-	Version = "0.1.0"
+// Version of this library. Used to form the default user agent string.
+const Version = "0.1.0"
 
-	defaultServer = "https://api.genderize.io/"
-)
+const defaultServer = "https://api.genderize.io/"
 
 // Config for a Genderize client.
 type Config struct {
@@ -144,7 +143,6 @@ func (client *Client) Get(query Query) ([]Response, error) {
 	}
 
 	// Unpack the response.
-
 	success := 200 <= resp.StatusCode && resp.StatusCode < 300
 	decoder := json.NewDecoder(resp.Body)
 	defer resp.Body.Close()
