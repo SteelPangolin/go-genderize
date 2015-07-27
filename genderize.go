@@ -1,17 +1,22 @@
-package main
+package genderize
 
 import (
 	"encoding/json"
 	"net/http"
 	"net/url"
 	"strconv"
+)
 
-	"fmt"
+// Gender string constants.
+const (
+	Male    = "male"
+	Female  = "female"
+	Unknown = ""
 )
 
 const (
-	// The version is used to form the default user agent string.
-	version = "0.1.0"
+	// Version of this library. Used to form the default user agent string.
+	Version = "0.1.0"
 
 	defaultServer = "https://api.genderize.io/"
 )
@@ -24,28 +29,28 @@ type Config struct {
 	HTTPClient *http.Client
 }
 
-// The Genderize client itself.
-type Genderize struct {
+// Client for the Genderize API.
+type Client struct {
 	userAgent  string
 	apiKey     string
 	apiURL     *url.URL
 	httpClient *http.Client
 }
 
-// NewGenderize constructs a Genderize client from a Config.
-func NewGenderize(config Config) (*Genderize, error) {
-	genderize := &Genderize{
-		userAgent:  "GoGenderize/" + version,
+// NewClient constructs a Genderize client from a Config.
+func NewClient(config Config) (*Client, error) {
+	client := &Client{
+		userAgent:  "GoGenderize/" + Version,
 		apiKey:     config.APIKey,
 		httpClient: http.DefaultClient,
 	}
 
 	if config.UserAgent != "" {
-		genderize.userAgent = config.UserAgent
+		client.userAgent = config.UserAgent
 	}
 
 	if config.HTTPClient != nil {
-		genderize.httpClient = config.HTTPClient
+		client.httpClient = config.HTTPClient
 	}
 
 	server := defaultServer
@@ -56,19 +61,30 @@ func NewGenderize(config Config) (*Genderize, error) {
 	if err != nil {
 		return nil, err
 	}
-	genderize.apiURL = apiURL
+	client.apiURL = apiURL
 
-	return genderize, nil
+	return client, nil
 }
 
-// A NameQuery is a list of names with optional country and language IDs.
-type NameQuery struct {
+var defaultClient *Client
+
+func init() {
+	var err error
+	defaultClient, err = NewClient(Config{})
+	if err != nil {
+		panic(err)
+	}
+}
+
+// A Query is a list of names with optional country and language IDs.
+type Query struct {
 	Names      []string
 	CountryID  string
 	LanguageID string
 }
 
-type NameResponse struct {
+// A Response is a name with gender and probability information attached.
+type Response struct {
 	Name string
 	// Gender can be "male", "female", or empty,
 	// in which case Probability and Count should be ignored.
@@ -82,49 +98,68 @@ type rawNameResponse struct {
 	Count                     int64
 }
 
-type rawErrorResponse struct {
-	Error string
+// A ServerError contains a message from the Genderize API server.
+type ServerError struct {
+	Message string `json:"error"`
 }
 
-func (genderize *Genderize) Get(nameQuery NameQuery) ([]NameResponse, error) {
-	if len(nameQuery.Names) == 0 {
+// Error returns the error message.
+func (serverError ServerError) Error() string {
+	return serverError.Message
+}
+
+// Get gender info for names with optional country and language IDs.
+func (client *Client) Get(query Query) ([]Response, error) {
+	if len(query.Names) == 0 {
 		return nil, nil
 	}
 
-	// Build URL query params from NameQuery.
+	// Build URL query params from Query.
 	params := url.Values{}
-	for _, name := range nameQuery.Names {
+	for _, name := range query.Names {
 		params.Add("name[]", name)
 	}
-	if genderize.apiKey != "" {
-		params.Add("api_key", genderize.apiKey)
+	if client.apiKey != "" {
+		params.Add("apikey", client.apiKey)
 	}
-	if nameQuery.CountryID != "" {
-		params.Add("country_id", nameQuery.CountryID)
+	if query.CountryID != "" {
+		params.Add("country_id", query.CountryID)
 	}
-	if nameQuery.LanguageID != "" {
-		params.Add("language_id", nameQuery.LanguageID)
+	if query.LanguageID != "" {
+		params.Add("language_id", query.LanguageID)
 	}
-	queryURL := *genderize.apiURL
+	queryURL := *client.apiURL
 	queryURL.RawQuery = params.Encode()
 
 	// Make the HTTP request.
 	req := &http.Request{
 		URL: &queryURL,
 		Header: http.Header{
-			"User-Agent": {genderize.userAgent},
+			"User-Agent": {client.userAgent},
 		},
 	}
-	resp, err := genderize.httpClient.Do(req)
+	resp, err := client.httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
 
 	// Unpack the response.
+
+	success := 200 <= resp.StatusCode && resp.StatusCode < 300
 	decoder := json.NewDecoder(resp.Body)
 	defer resp.Body.Close()
+
+	if !success {
+		apiErr := ServerError{}
+		err = decoder.Decode(&apiErr)
+		if err != nil {
+			return nil, err
+		}
+		return nil, apiErr
+	}
+
 	raws := []rawNameResponse{}
-	if len(nameQuery.Names) == 1 {
+	if len(query.Names) == 1 {
 		raw := rawNameResponse{}
 		err = decoder.Decode(&raw)
 		raws = []rawNameResponse{raw}
@@ -136,14 +171,14 @@ func (genderize *Genderize) Get(nameQuery NameQuery) ([]NameResponse, error) {
 	}
 
 	// Convert the response to the exported format.
-	nameResponses := make([]NameResponse, len(raws))
+	nameResponses := make([]Response, len(raws))
 	for i, raw := range raws {
 		probability, err := strconv.ParseFloat(raw.Probability, 64)
 		if err != nil {
 			probability = 0.0
 		}
 
-		nameResponses[i] = NameResponse{
+		nameResponses[i] = Response{
 			Name:        raw.Name,
 			Gender:      raw.Gender,
 			Count:       raw.Count,
@@ -153,27 +188,8 @@ func (genderize *Genderize) Get(nameQuery NameQuery) ([]NameResponse, error) {
 	return nameResponses, nil
 }
 
-func main() {
-	genderize, err := NewGenderize(Config{})
-	if err != nil {
-		panic(err)
-	}
-
-	nameResponses, err := genderize.Get(NameQuery{
-		Names: []string{"Jason", "Molly", "Thunderhorse"},
-	})
-	if err != nil {
-		panic(err)
-	}
-	for _, nameResponse := range nameResponses {
-		fmt.Printf("%#v\n", nameResponse)
-	}
-
-	nameResponses, err = genderize.Get(NameQuery{Names: []string{"T-Bone"}})
-	if err != nil {
-		panic(err)
-	}
-	for _, nameResponse := range nameResponses {
-		fmt.Printf("%#v\n", nameResponse)
-	}
+// Get gender info for names, using the default client and country/language IDs.
+func Get(names []string) ([]Response, error) {
+	nameResponses, err := defaultClient.Get(Query{Names: names})
+	return nameResponses, err
 }
