@@ -1,1 +1,18 @@
+sudo: false
+dist: trusty
+
 language: go
+
+install:
+  - go get -t ./...
+  - go get golang.org/x/lint/golint
+
+script:
+  - gofmt -l . > gofmt.txt && cat gofmt.txt && test \! -s gofmt.txt
+  - golint > golint.txt && cat golint.txt && test \! -s golint.txt
+  - go vet
+  - go test -race -coverprofile=coverage.txt -covermode=atomic
+
+after_success:
+  - bash <(curl -s https://codecov.io/bash)
+  - curl -F path=github.com/$TRAVIS_REPO_SLUG https://godoc.org/-/refresh

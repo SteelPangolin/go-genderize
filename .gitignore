@@ -1,1 +1,8 @@
+.DS_Store
+._*
 *.swp
+.idea
+*.iml
+coverage.txt
+gofmt.txt
+golint.txt

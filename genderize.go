@@ -16,9 +16,13 @@ const (
 )
 
 // Version of this library. Used to form the default user agent string.
-const Version = "0.1.0"
+const Version = "0.2.0"
 
 const defaultServer = "https://api.genderize.io/"
+
+// API requests are now limited to this many names per request.
+// See https://genderize.io/#multipleusage for more.
+const batchSize = 10
 
 // Config for a Genderize client.
 type Config struct {
@@ -92,14 +96,22 @@ type Response struct {
 	Count       int64
 }
 
-type rawNameResponse struct {
-	Name, Gender, Probability string
-	Count                     int64
-}
-
 // A ServerError contains a message from the Genderize API server.
 type ServerError struct {
-	Message string `json:"error"`
+	Message    string `json:"error"`
+	StatusCode int
+	RateLimit  *RateLimit
+}
+
+// RateLimit holds info on API quotas from rate limit headers.
+// See https://genderize.io/#rate-limiting for details.
+type RateLimit struct {
+	// The number of names allotted for the current time window.
+	Limit int64
+	// The number of names left in the current time window.
+	Remaining int64
+	// Seconds remaining until a new time window opens.
+	Reset int64
 }
 
 // Error returns the error message.
@@ -109,10 +121,36 @@ func (serverError ServerError) Error() string {
 
 // Get gender info for names with optional country and language IDs.
 func (client *Client) Get(query Query) ([]Response, error) {
-	if len(query.Names) == 0 {
+	n := len(query.Names)
+	if n == 0 {
 		return nil, nil
 	}
 
+	responses := make([]Response, n)
+	responseIdx := 0
+	for batchStart := 0; batchStart < n; batchStart += batchSize {
+		batchEnd := batchStart + batchSize
+		if batchEnd > n {
+			batchEnd = n
+		}
+		batchResponses, err := client.getBatch(Query{
+			Names:      query.Names[batchStart:batchEnd],
+			CountryID:  query.CountryID,
+			LanguageID: query.LanguageID,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, batchResponse := range batchResponses {
+			responses[responseIdx] = batchResponse
+			responseIdx++
+		}
+	}
+
+	return responses, nil
+}
+
+func (client *Client) getBatch(query Query) ([]Response, error) {
 	// Build URL query params from Query.
 	params := url.Values{}
 	for _, name := range query.Names {
@@ -148,41 +186,34 @@ func (client *Client) Get(query Query) ([]Response, error) {
 	defer resp.Body.Close()
 
 	if !success {
-		apiErr := ServerError{}
-		err = decoder.Decode(&apiErr)
-		if err != nil {
-			return nil, err
+		apiErr := ServerError{
+			StatusCode: resp.StatusCode,
 		}
+
+		// Get error message. Best effort.
+		decoder.Decode(&apiErr)
+
+		// Parse rate limit headers. Best effort.
+		limit, limitErr := strconv.ParseInt(resp.Header.Get("X-Rate-Limit-Limit"), 10, 64)
+		remaining, remainingErr := strconv.ParseInt(resp.Header.Get("X-Rate-Limit-Remaining"), 10, 64)
+		reset, resetErr := strconv.ParseInt(resp.Header.Get("X-Rate-Reset"), 10, 64)
+		if limitErr == nil && remainingErr == nil && resetErr == nil {
+			apiErr.RateLimit = &RateLimit{
+				Limit:     limit,
+				Remaining: remaining,
+				Reset:     reset,
+			}
+		}
+
 		return nil, apiErr
 	}
 
-	raws := []rawNameResponse{}
-	if len(query.Names) == 1 {
-		raw := rawNameResponse{}
-		err = decoder.Decode(&raw)
-		raws = []rawNameResponse{raw}
-	} else {
-		err = decoder.Decode(&raws)
-	}
+	nameResponses := []Response{}
+	err = decoder.Decode(&nameResponses)
 	if err != nil {
 		return nil, err
 	}
 
-	// Convert the response to the exported format.
-	nameResponses := make([]Response, len(raws))
-	for i, raw := range raws {
-		probability, err := strconv.ParseFloat(raw.Probability, 64)
-		if err != nil {
-			probability = 0.0
-		}
-
-		nameResponses[i] = Response{
-			Name:        raw.Name,
-			Gender:      raw.Gender,
-			Count:       raw.Count,
-			Probability: probability,
-		}
-	}
 	return nameResponses, nil
 }
 
